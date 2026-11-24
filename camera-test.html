@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>旅の小径｜カメラ動作確認</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      text-align: center;
+      background: #f5f1e8;
+      padding: 16px;
+    }
+    video {
+      width: 100%;
+      max-width: 480px;
+      aspect-ratio: 3 / 4;
+      object-fit: cover;
+      background: #222;
+      border-radius: 12px;
+    }
+    button {
+      padding: 12px 20px;
+      margin: 8px;
+      font-size: 16px;
+    }
+    #status { overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <h2>旅の小径 カメラ動作確認</h2>
+  <p>MindARを使用しないテスト</p>
+  <video id="camera" autoplay muted playsinline></video>
+  <div>
+    <button id="start">カメラ起動</button>
+    <button id="stop" disabled>停止</button>
+  </div>
+  <p id="status" role="status">カメラ起動ボタンを押してください</p>
+  <script>
+    const video = document.getElementById("camera");
+    const status = document.getElementById("status");
+    const start = document.getElementById("start");
+    const stop = document.getElementById("stop");
+    let stream = null;
+
+    video.addEventListener("playing", () => {
+      status.textContent = "成功：カメラ映像を表示中";
+    });
+
+    start.addEventListener("click", async () => {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        status.textContent = "この環境ではカメラAPIが使えません";
+        return;
+      }
+      start.disabled = true;
+      status.textContent = "カメラへの接続を確認中";
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: { facingMode: { ideal: "environment" } }
+        });
+        video.srcObject = stream;
+        stop.disabled = false;
+        status.textContent = "カメラ取得成功：映像を準備中";
+        video.play().catch(error => {
+          status.textContent = "映像再生エラー：" + error.name;
+        });
+      } catch (error) {
+        status.textContent =
+          "カメラ取得エラー：" + error.name + " / " + error.message;
+        start.disabled = false;
+      }
+    });
+
+    function stopCamera() {
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+        stream = null;
+      }
+      video.pause();
+      video.srcObject = null;
+      start.disabled = false;
+      stop.disabled = true;
+      status.textContent = "カメラ停止";
+    }
+
+    stop.addEventListener("click", stopCamera);
+    window.addEventListener("pagehide", stopCamera);
+  </script>
+</body>
+</html>
