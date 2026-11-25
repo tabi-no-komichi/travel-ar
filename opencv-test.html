@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>旅の小径 OpenCVテスト</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      background: #f5f1e8;
+      text-align: center;
+      padding: 24px;
+    }
+    #status {
+      background: white;
+      padding: 20px;
+      border-radius: 12px;
+      overflow-wrap: anywhere;
+    }
+  </style>
+</head>
+<body>
+  <h2>旅の小径</h2>
+  <h3>OpenCV.js 動作確認</h3>
+  <p id="status">OpenCV.jsを読み込み中...</p>
+
+  <script>
+    const statusElement = document.getElementById("status");
+    let finished = false;
+
+    async function checkOpenCv() {
+      try {
+        const cv = await Promise.resolve(window.cv);
+        if (!cv || typeof cv.Mat !== "function") {
+          throw new Error("OpenCVの初期化を確認できません");
+        }
+
+        const mat = new cv.Mat(2, 2, cv.CV_8UC1);
+        mat.delete();
+
+        finished = true;
+        statusElement.textContent =
+          "成功：OpenCV.jsが正常に動作しました！";
+      } catch (error) {
+        finished = true;
+        statusElement.textContent =
+          "初期化エラー：" + error.message;
+      }
+    }
+
+    function loadError() {
+      finished = true;
+      statusElement.textContent =
+        "読み込みエラー：OpenCV.jsを取得できません";
+    }
+
+    setTimeout(() => {
+      if (!finished) {
+        statusElement.textContent =
+          "読み込みに時間がかかっています";
+      }
+    }, 30000);
+  </script>
+  <script async
+    src="https://docs.opencv.org/4.x/opencv.js"
+    onload="checkOpenCv()"
+    onerror="loadError()">
+  </script>
+</body>
+</html>
