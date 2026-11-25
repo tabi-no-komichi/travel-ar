@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>旅の小径 OpenCV診断</title>
+<style>
+body {
+  font-family: sans-serif;
+  background: #f5f1e8;
+  padding: 20px;
+}
+h2, p { text-align: center; }
+#log {
+  background: white;
+  padding: 16px;
+  border-radius: 12px;
+  font-size: 15px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+</style>
+</head>
+<body>
+<h2>旅の小径</h2>
+<p>OpenCV.js 診断テスト</p>
+<div id="log">診断画面を起動しました</div>
+
+<script>
+const logArea = document.getElementById("log");
+function log(message) {
+  logArea.textContent += "\n" + message;
+}
+
+function workerMain() {
+  let completed = false;
+
+  function report(kind, message) {
+    self.postMessage({ kind, message });
+  }
+
+  function verify(cvModule) {
+    if (completed) return;
+    try {
+      if (!cvModule || typeof cvModule.Mat !== "function") {
+        report("phase", "初期化待ち：Matはまだ利用できません");
+        return;
+      }
+      const mat = new cvModule.Mat(2, 2, cvModule.CV_8UC1);
+      mat.delete();
+      completed = true;
+      report("success", "成功：OpenCV.jsの画像処理を実行できました");
+    } catch (e) {
+      completed = true;
+      report("error", "画像処理エラー：" + e.message);
+    }
+  }
+
+  self.Module = {
+    onRuntimeInitialized: function() {
+      report("phase", "初期化完了の通知を受信");
+      verify(self.cv || self.Module);
+    }
+  };
+
+  try {
+    report("phase", "OpenCV.jsの取得・実行を開始");
+    importScripts(
+      "https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js"
+    );
+    report("phase", "スクリプトの読み込み・実行が戻りました");
+
+    if (!self.cv) {
+      report("error", "cvが見つかりません");
+    } else if (typeof self.cv.then === "function") {
+      report("phase", "初期化を待っています");
+      self.cv.then(verify).catch(function(e) {
+        report("error", "初期化エラー：" + e.message);
+      });
+    } else if (typeof self.cv.Mat === "function") {
+      verify(self.cv);
+    } else {
+      report("phase", "OpenCVの初期化通知を待っています");
+      self.cv.onRuntimeInitialized = function() {
+        verify(self.cv);
+      };
+    }
+  } catch (e) {
+    report("error", "取得または実行エラー：" + e.name + " / " + e.message);
+  }
+}
+
+let worker;
+let timer;
+let workerUrl;
+
+function finish() {
+  clearTimeout(timer);
+  if (worker) worker.terminate();
+  if (workerUrl) URL.revokeObjectURL(workerUrl);
+}
+
+try {
+  const source = "(" + workerMain.toString() + ")();";
+  workerUrl = URL.createObjectURL(
+    new Blob([source], { type: "text/javascript" })
+  );
+  worker = new Worker(workerUrl);
+
+  log("診断用ワーカーを作成しました");
+
+  worker.onmessage = function(event) {
+    const data = event.data;
+    log(data.message);
+    if (data.kind === "success" || data.kind === "error") {
+      finish();
+    }
+  };
+
+  worker.onerror = function(event) {
+    log("ワーカーエラー：" + event.message);
+    finish();
+  };
+
+  timer = setTimeout(function() {
+    log("時間制限：60秒で診断を終了しました");
+    finish();
+  }, 60000);
+} catch (e) {
+  log("ワーカー作成エラー：" + e.message);
+  finish();
+}
+</script>
+</body>
+</html>
