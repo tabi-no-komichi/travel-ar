@@ -75,9 +75,7 @@ function workerMain() {
       report("error", "cvが見つかりません");
     } else if (typeof self.cv.then === "function") {
       report("phase", "初期化を待っています");
-      self.cv.then(verify).catch(function(e) {
-        report("error", "初期化エラー：" + e.message);
-      });
+     self.cv.then(verify);
     } else if (typeof self.cv.Mat === "function") {
       verify(self.cv);
     } else {
