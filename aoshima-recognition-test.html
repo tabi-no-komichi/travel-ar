@@ -52,7 +52,7 @@ function workerTask(){
    desc=new cv.Mat();
    cv.cvtColor(src,gray,cv.COLOR_RGBA2GRAY);
    if(!cv.ORB)throw Error("ORB機能がありません");
-   orb=cv.ORB.create();
+   orb=new cv.ORB();
    orb.detectAndCompute(gray,mask,points,desc);
    postMessage({type:"result",
      count:points.size()});
