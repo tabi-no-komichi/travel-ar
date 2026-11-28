@@ -76,6 +76,8 @@ const reference=document.getElementById("reference");
 const camera=document.getElementById("camera");
 const overlay=document.getElementById("overlay");
 const pen=overlay.getContext("2d");
+  const kiteImage=new Image();
+kiteImage.src="aoshima_kite_cutout.png";
 const info=document.getElementById("info");
 const startButton=document.getElementById("start");
 const motionButton=document.getElementById("motion");
@@ -127,41 +129,12 @@ function animate(time){
     pen.translate(kitePoint[0],kitePoint[1]+bob);
     pen.rotate(angle);
 
-    // 小さな凧の本体
-    pen.fillStyle="rgba(245,157,74,0.85)";
-    pen.strokeStyle="#a65c2d";
-    pen.lineWidth=1.6;
-
-    pen.beginPath();
-    pen.moveTo(0,-23);
-    pen.lineTo(17,0);
-    pen.lineTo(0,23);
-    pen.lineTo(-17,0);
-    pen.closePath();
-    pen.fill();
-    pen.stroke();
-
-    // 凧の骨組み
-    pen.strokeStyle="rgba(255,255,255,0.9)";
-    pen.lineWidth=1.5;
-    pen.beginPath();
-    pen.moveTo(0,-23);
-    pen.lineTo(0,23);
-    pen.moveTo(-17,0);
-    pen.lineTo(17,0);
-    pen.stroke();
-
-    // 風で揺れる凧の尾
-    pen.strokeStyle="#b16a46";
-    pen.lineWidth=2;
-    pen.beginPath();
-    pen.moveTo(0,23);
-    pen.bezierCurveTo(
-      8,32,
-      -8+Math.sin(time/400)*6,42,
-      Math.sin(time/350)*8,55
-    );
-    pen.stroke();
+        // 原画から切り出した梅模様の凧
+    if(kiteImage.complete && kiteImage.naturalWidth>0){
+      const w=60;
+      const h=w*kiteImage.naturalHeight/kiteImage.naturalWidth;
+      pen.drawImage(kiteImage,-w*0.65,-h*0.17,w,h);
+    }
 
     pen.restore();
   }
