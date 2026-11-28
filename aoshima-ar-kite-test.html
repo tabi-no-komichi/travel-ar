@@ -1,0 +1,624 @@
+
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>旅の小径・青島の凧 AR実験</title>
+<style>
+body {
+  font-family: sans-serif;
+  text-align: center;
+  background: #f5f1e8;
+  padding: 12px;
+}
+#reference {
+  width: 90px;
+  max-height: 140px;
+  object-fit: contain;
+}
+#stage {
+  position: relative;
+  width: 100%;
+  max-width: 480px;
+  margin: 12px auto;
+}
+video {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: #222;
+  border-radius: 8px;
+}
+canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+button {
+  font-size: 16px;
+  padding: 12px;
+  margin: 4px;
+}
+#info {
+  background: white;
+  border-radius: 8px;
+  padding: 14px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+</style>
+</head>
+<body>
+
+<h2>旅の小径</h2>
+<p>青島・凧の位置合わせ実験</p>
+
+<img id="reference"
+     src="aoshima_ar_target.png"
+     alt="青島の背景画">
+
+<div id="stage">
+  <video id="camera" autoplay muted playsinline></video>
+  <canvas id="overlay"></canvas>
+</div>
+
+<button id="start" disabled>カメラ起動</button>
+<button id="track" disabled>凧の目印を表示</button>
+<button id="stop" disabled>カメラ停止</button>
+
+<p id="info">画像認識の準備中...</p>
+
+<script>
+const reference = document.getElementById("reference");
+const camera = document.getElementById("camera");
+const overlay = document.getElementById("overlay");
+const pen = overlay.getContext("2d");
+const info = document.getElementById("info");
+const startButton = document.getElementById("start");
+const trackButton = document.getElementById("track");
+const stopButton = document.getElementById("stop");
+
+let worker = null;
+let ready = false;
+let refSent = false;
+let refReady = false;
+let stream = null;
+let tracking = false;
+let busy = false;
+let timer = null;
+let missed = 0;
+
+function show(text) {
+  info.textContent = text;
+}
+
+function capture(element) {
+  const w = element.videoWidth || element.naturalWidth;
+  const h = element.videoHeight || element.naturalHeight;
+  if (!w || !h) throw Error("画像を取得できません");
+
+  const scale = 480 / Math.max(w, h);
+  const c = document.createElement("canvas");
+  c.width = Math.round(w * scale);
+  c.height = Math.round(h * scale);
+
+  const x = c.getContext("2d", {
+    willReadFrequently: true
+  });
+  x.drawImage(element, 0, 0, c.width, c.height);
+  return x.getImageData(0, 0, c.width, c.height);
+}
+
+function clearMarker() {
+  pen.clearRect(0, 0, overlay.width, overlay.height);
+}
+
+function drawMarker(point, width, height) {
+  overlay.width = width;
+  overlay.height = height;
+
+  const x = point[0];
+  const y = point[1];
+
+  // 凧の位置に小さなオレンジ色の目印を描く
+  pen.lineWidth = 3;
+  pen.strokeStyle = "#f26b21";
+  pen.fillStyle = "rgba(255,255,255,0.9)";
+
+  pen.beginPath();
+  pen.arc(x, y, 12, 0, Math.PI * 2);
+  pen.fill();
+  pen.stroke();
+
+  pen.beginPath();
+  pen.moveTo(x - 21, y);
+  pen.lineTo(x - 15, y);
+  pen.moveTo(x + 15, y);
+  pen.lineTo(x + 21, y);
+  pen.moveTo(x, y - 21);
+  pen.lineTo(x, y - 15);
+  pen.moveTo(x, y + 15);
+  pen.lineTo(x, y + 21);
+  pen.stroke();
+}
+
+function workerProgram() {
+  let cv, orb, matcher;
+  let refPoints = null;
+  let refDesc = null;
+  let refWidth = 0;
+  let refHeight = 0;
+  let initialized = false;
+
+  // 背景画内の凧の位置（仮設定）
+  // 左から86％、上から26％
+  const KITE_X = 0.86;
+  const KITE_Y = 0.26;
+
+  function release(item) {
+    if (item && typeof item.delete === "function") {
+      item.delete();
+    }
+  }
+
+  function report(type, data) {
+    self.postMessage(Object.assign({type}, data || {}));
+  }
+
+  function features(image) {
+    let src, gray, mask, points, desc;
+
+    try {
+      src = cv.matFromImageData(image);
+      gray = new cv.Mat();
+      mask = new cv.Mat();
+      points = new cv.KeyPointVector();
+      desc = new cv.Mat();
+
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+      orb.detectAndCompute(gray, mask, points, desc);
+
+      return {points, desc};
+    } catch (e) {
+      release(points);
+      release(desc);
+      throw e;
+    } finally {
+      release(src);
+      release(gray);
+      release(mask);
+    }
+  }
+
+  function project(H, x, y) {
+    const a = H.data64F && H.data64F.length === 9
+      ? H.data64F : H.data32F;
+
+    if (!a || a.length !== 9) {
+      throw Error("変換行列を取得できません");
+    }
+
+    const d = a[6] * x + a[7] * y + a[8];
+
+    if (Math.abs(d) < 0.000001) {
+      throw Error("座標計算が不安定です");
+    }
+
+    return [
+      (a[0] * x + a[1] * y + a[2]) / d,
+      (a[3] * x + a[4] * y + a[5]) / d
+    ];
+  }
+
+  function compare(image) {
+    let f = null;
+    let matches = null;
+    let from = null;
+    let to = null;
+    let mask = null;
+    let H = null;
+
+    try {
+      f = features(image);
+
+      if (!refDesc || refDesc.rows === 0 ||
+          f.desc.rows === 0) {
+        report("result", {ok:false,good:0,inliers:0});
+        return;
+      }
+
+      matches = new cv.DMatchVector();
+      matcher.match(refDesc, f.desc, matches);
+
+      const source = [];
+      const target = [];
+
+      for (let i = 0; i < matches.size(); i++) {
+        const m = matches.get(i);
+
+        if (m.distance > 60) continue;
+
+        const p = refPoints.get(m.queryIdx).pt;
+        const q = f.points.get(m.trainIdx).pt;
+
+        source.push(p.x, p.y);
+        target.push(q.x, q.y);
+      }
+
+      const good = source.length / 2;
+
+      if (good < 12) {
+        report("result", {ok:false,good,inliers:0});
+        return;
+      }
+
+      from = cv.matFromArray(
+        good, 1, cv.CV_32FC2, source
+      );
+
+      to = cv.matFromArray(
+        good, 1, cv.CV_32FC2, target
+      );
+
+      mask = new cv.Mat();
+
+      H = cv.findHomography(
+        from, to, cv.RANSAC, 5, mask
+      );
+
+      let inliers = 0;
+      for (const value of mask.data) {
+        if (value !== 0) inliers++;
+      }
+
+      if (H.rows !== 3 ||
+          inliers < 10 ||
+          inliers / good < 0.45) {
+        report("result", {ok:false,good,inliers});
+        return;
+      }
+
+      // 背景画の位置に合わせて凧の位置を計算
+      const point = project(
+        H,
+        refWidth * KITE_X,
+        refHeight * KITE_Y
+      );
+
+      if (!point.every(Number.isFinite)) {
+        report("result", {ok:false,good,inliers});
+        return;
+      }
+
+      // 明らかに画面外の誤った位置を除く
+      if (point[0] < -image.width ||
+          point[0] > image.width * 2 ||
+          point[1] < -image.height ||
+          point[1] > image.height * 2) {
+        report("result", {ok:false,good,inliers});
+        return;
+      }
+
+      report("result", {
+        ok: true,
+        good,
+        inliers,
+        point,
+        width: image.width,
+        height: image.height
+      });
+
+    } catch (e) {
+      report("error", {message:String(e)});
+    } finally {
+      if (f) {
+        release(f.points);
+        release(f.desc);
+      }
+
+      for (const item of [matches,from,to,mask,H]) {
+        release(item);
+      }
+    }
+  }
+
+  function initialize(module) {
+    try {
+      cv = module;
+      orb = new cv.ORB();
+      matcher = new cv.BFMatcher(
+        cv.NORM_HAMMING, true
+      );
+
+      if (typeof cv.findHomography !== "function") {
+        throw Error("位置計算機能がありません");
+      }
+
+      initialized = true;
+      report("ready");
+    } catch (e) {
+      report("error", {message:String(e)});
+    }
+  }
+
+  self.onmessage = event => {
+    if (!initialized) return;
+
+    const data = event.data;
+
+    if (data.type === "reference") {
+      let f = null;
+
+      try {
+        f = features(data.image);
+
+        release(refPoints);
+        release(refDesc);
+
+        refPoints = f.points;
+        refDesc = f.desc;
+        f = null;
+
+        refWidth = data.image.width;
+        refHeight = data.image.height;
+
+        if (refDesc.rows === 0) {
+          throw Error("背景画の特徴量がありません");
+        }
+
+        report("reference", {
+          count: refPoints.size()
+        });
+
+      } catch (e) {
+        report("error", {message:String(e)});
+      } finally {
+        if (f) {
+          release(f.points);
+          release(f.desc);
+        }
+      }
+
+    } else if (data.type === "frame") {
+      compare(data.image);
+    }
+  };
+
+  try {
+    importScripts(
+      "https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js"
+    );
+
+    const module = self.cv;
+
+    if (module && typeof module.then === "function") {
+      module.then(initialize).catch(e => {
+        report("error", {message:String(e)});
+      });
+    } else if (module &&
+               typeof module.Mat === "function") {
+      initialize(module);
+    } else {
+      report("error", {
+        message:"OpenCV.jsを初期化できません"
+      });
+    }
+
+  } catch (e) {
+    report("error", {message:String(e)});
+  }
+}
+
+function sendReference() {
+  if (!ready || refSent || !reference.naturalWidth) {
+    return;
+  }
+
+  refSent = true;
+  worker.postMessage({
+    type:"reference",
+    image:capture(reference)
+  });
+}
+
+function stopTracking() {
+  tracking = false;
+  clearTimeout(timer);
+  missed = 0;
+  clearMarker();
+  trackButton.textContent = "凧の目印を表示";
+}
+
+function nextFrame() {
+  clearTimeout(timer);
+
+  if (!tracking || !stream || busy) return;
+
+  if (!camera.videoWidth) {
+    timer = setTimeout(nextFrame, 300);
+    return;
+  }
+
+  try {
+    busy = true;
+
+    worker.postMessage({
+      type:"frame",
+      image:capture(camera)
+    });
+  } catch (e) {
+    busy = false;
+    show("撮影エラー：" + String(e));
+    timer = setTimeout(nextFrame, 500);
+  }
+}
+
+function stopEverything() {
+  stopTracking();
+
+  if (stream) {
+    stream.getTracks().forEach(t => t.stop());
+  }
+
+  stream = null;
+  camera.srcObject = null;
+
+  startButton.disabled = !refReady;
+  trackButton.disabled = true;
+  stopButton.disabled = true;
+
+  show("カメラを停止しました");
+}
+
+try {
+  const source = "(" + workerProgram.toString() + ")()";
+
+  const url = URL.createObjectURL(
+    new Blob([source], {type:"text/javascript"})
+  );
+
+  worker = new Worker(url);
+  URL.revokeObjectURL(url);
+
+  const loadingTimeout = setTimeout(() => {
+    if (!ready) {
+      show("読み込みが完了しませんでした");
+    }
+  }, 60000);
+
+  worker.onmessage = event => {
+    const data = event.data;
+
+    if (data.type === "ready") {
+      ready = true;
+      clearTimeout(loadingTimeout);
+      sendReference();
+
+    } else if (data.type === "reference") {
+      refReady = true;
+      startButton.disabled = false;
+
+      show(
+        "青島の特徴点：" + data.count +
+        "個\n凧の実験準備完了"
+      );
+
+    } else if (data.type === "result") {
+      busy = false;
+
+      if (!tracking) return;
+
+      if (data.ok) {
+        missed = 0;
+
+        drawMarker(
+          data.point,
+          data.width,
+          data.height
+        );
+
+        show(
+          "凧の位置を追従中\n" +
+          "一致候補：" + data.good + "組\n" +
+          "位置一致：" + data.inliers + "組"
+        );
+
+      } else {
+        missed++;
+
+        if (missed >= 2) {
+          clearMarker();
+        }
+
+        show(
+          "青島の背景画を探しています...\n" +
+          "一致候補：" + data.good + "組\n" +
+          "位置一致：" + data.inliers + "組"
+        );
+      }
+
+      timer = setTimeout(nextFrame, 300);
+
+    } else if (data.type === "error") {
+      stopTracking();
+      busy = false;
+      show("エラー：" + data.message);
+    }
+  };
+
+  worker.onerror = event => {
+    stopTracking();
+    busy = false;
+    show("プログラムエラー：" + event.message);
+  };
+
+} catch (e) {
+  show("起動エラー：" + String(e));
+}
+
+reference.onload = sendReference;
+
+reference.onerror = () => {
+  show("背景画の読み込みに失敗しました");
+};
+
+sendReference();
+
+startButton.onclick = async () => {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio:false,
+      video:{facingMode:{ideal:"environment"}}
+    });
+
+    camera.srcObject = stream;
+    await camera.play();
+
+    startButton.disabled = true;
+    trackButton.disabled = false;
+    stopButton.disabled = false;
+
+    show(
+      "カメラ起動成功\n" +
+      "青島の背景画を映してください"
+    );
+
+  } catch (e) {
+    if (stream) {
+      stream.getTracks().forEach(t => t.stop());
+      stream = null;
+    }
+    show("カメラエラー：" + e.name);
+  }
+};
+
+trackButton.onclick = () => {
+  if (!stream) return;
+
+  if (tracking) {
+    stopTracking();
+    show("凧の追従を停止しました");
+
+  } else {
+    tracking = true;
+    missed = 0;
+    trackButton.textContent = "追従停止";
+    show("凧の位置を探しています...");
+    nextFrame();
+  }
+};
+
+stopButton.onclick = stopEverything;
+
+window.addEventListener("pagehide", () => {
+  stopEverything();
+  if (worker) worker.terminate();
+});
+
+</script>
+</body>
+</html>
+aoshima-ar-kite-test.html
