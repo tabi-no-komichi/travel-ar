@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>旅の小径 青島画像照合</title>
+<style>
+body{font-family:sans-serif;text-align:center;background:#f5f1e8;padding:12px}
+img{width:120px;max-height:180px;object-fit:contain}
+video{width:100%;max-width:440px;background:#222;border-radius:10px}
+button{font-size:16px;padding:12px;margin:5px}
+#status{background:white;border-radius:10px;padding:16px;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<h2>旅の小径</h2>
+<p>青島・画像照合実験</p>
+<img id="reference" src="aoshima_ar_target.png" alt="青島の背景画">
+<p><video id="camera" autoplay muted playsinline></video></p>
+<button id="start" disabled>カメラ起動</button>
+<button id="compare" disabled>青島の絵を照合</button>
+<button id="stop" disabled>停止</button>
+<p id="status">画像認識の準備中...</p>
+<script>
+const ref=document.getElementById("reference");
+const video=document.getElementById("camera");
+const status=document.getElementById("status");
+const start=document.getElementById("start");
+const compare=document.getElementById("compare");
+const stop=document.getElementById("stop");
+let stream=null,ready=false,referenceSent=false;
+let referenceReady=false,working=false;
+
+function message(s){status.textContent=s}
+function capture(element){
+ const width=element.videoWidth||element.naturalWidth;
+ const height=element.videoHeight||element.naturalHeight;
+ const scale=480/Math.max(width,height);
+ const c=document.createElement("canvas");
+ c.width=Math.max(1,Math.round(width*scale));
+ c.height=Math.max(1,Math.round(height*scale));
+ const ctx=c.getContext("2d");
+ ctx.drawImage(element,0,0,c.width,c.height);
+ return ctx.getImageData(0,0,c.width,c.height);
+}
+function workerProgram(){
+ let cv,orb,matcher,refPoints,refDesc;
+ function report(type,text){
+  self.postMessage({type,text});
+ }
+ function release(x){
+  if(x&&typeof x.delete==="function")x.delete();
+ }
+ function features(image){
+  const src=cv.matFromImageData(image);
+  const gray=new cv.Mat();
+  const mask=new cv.Mat();
+  const pts=new cv.KeyPointVector();
+  const desc=new cv.Mat();
+  try{
+   cv.cvtColor(src,gray,cv.COLOR_RGBA2GRAY);
+   orb.detectAndCompute(gray,mask,pts,desc);
+   return {pts,desc};
+  }catch(e){
+   release(pts);release(desc);throw e;
+  }finally{
+   release(src);release(gray);release(mask);
+  }
+ }
+ function initialize(module){
+  try{
+   cv=module;
+   orb=new cv.ORB();
+   matcher=new cv.BFMatcher(cv.NORM_HAMMING,true);
+   report("ready","OpenCV.js準備完了");
+  }catch(e){
+   report("error","初期化エラー："+String(e));
+  }
+ }
+ self.onmessage=function(event){
+  if(!cv||!orb||!matcher)return;
+  const data=event.data;
+  let feat=null,matches=null,a=null,b=null,mask=null,h=null;
+  try{
+   if(data.type==="reference"){
+    feat=features(data.image);
+    release(refPoints);release(refDesc);
+    refPoints=feat.pts;
+    refDesc=feat.desc;
+    feat=null;
+    if(refDesc.rows===0)throw Error("背景画の特徴点がありません");
+    report("reference","青島の特徴点："+refPoints.size()+"個。カメラを起動できます");
+    return;
+   }
+   if(data.type!=="compare")return;
+   feat=features(data.image);
+   if(feat.desc.rows===0){
+    report("result","カメラ映像の特徴点が不足しています");
+    return;
+   }
+   matches=new cv.DMatchVector();
+   matcher.match(refDesc,feat.desc,matches);
+   const src=[],dst=[];
+   for(let i=0;i<matches.size();i++){
+    const m=matches.get(i);
+    if(m.distance>60)continue;
+    const p=refPoints.get(m.queryIdx).pt;
+    const q=feat.pts.get(m.trainIdx).pt;
+    src.push(p.x,p.y);
+    dst.push(q.x,q.y);
+   }
+   const good=src.length/2;
+   let inliers=0;
+   let geometry=false;
+   if(good>=12&&typeof cv.findHomography==="function"){
+    a=cv.matFromArray(good,1,cv.CV_32FC2,src);
+    b=cv.matFromArray(good,1,cv.CV_32FC2,dst);
+    mask=new cv.Mat();
+    h=cv.findHomography(a,b,cv.RANSAC,5,mask);
+    geometry=true;
+    for(const value of mask.data){
+     if(value!==0)inliers++;
+    }
+   }
+   const detected=geometry&&inliers>=10&&inliers/good>=0.45;
+   const result=detected
+    ?"青島の背景画を認識した可能性が高いです！"
+    :"まだ青島の背景画を確認できません";
+   report("result",result+"\n一致候補："+good+"組\n位置関係が一致："+inliers+"組");
+  }catch(e){
+   report("result","照合エラー："+String(e));
+  }finally{
+   if(feat){release(feat.pts);release(feat.desc)}
+   for(const x of [matches,a,b,mask,h])release(x);
+  }
+ };
+ try{
+  importScripts("https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js");
+  const module=self.cv;
+  if(module&&typeof module.then==="function"){
+   module.then(initialize,e=>report("error",String(e)));
+  }else if(module&&typeof module.Mat==="function"){
+   initialize(module);
+  }else{
+   report("error","OpenCV.jsの初期化に失敗しました");
+  }
+ }catch(e){
+  report("error","OpenCV.js取得エラー："+String(e));
+ }
+}
+const blob=new Blob(
+ ["("+workerProgram.toString()+")()"],
+ {type:"text/javascript"});
+const url=URL.createObjectURL(blob);
+const worker=new Worker(url);
+URL.revokeObjectURL(url);
+
+function sendReference(){
+ if(!ready||referenceSent||!ref.naturalWidth)return;
+ referenceSent=true;
+ worker.postMessage({type:"reference",image:capture(ref)});
+ message("青島の特徴点を解析中...");
+}
+const timeout=setTimeout(()=>{
+ if(!ready){
+  message("読み込みが60秒を超えました");
+  worker.terminate();
+ }
+},60000);
+worker.onmessage=e=>{
+ const {type,text}=e.data;
+ message(text);
+ if(type==="ready"){
+  ready=true;
+  clearTimeout(timeout);
+  sendReference();
+ }else if(type==="reference"){
+  referenceReady=true;
+  start.disabled=false;
+ }else if(type==="result"){
+  working=false;
+  compare.disabled=!stream;
+ }else if(type==="error"){
+  clearTimeout(timeout);
+  worker.terminate();
+ }
+};
+worker.onerror=e=>{
+ clearTimeout(timeout);
+ message("処理エラー："+e.message);
+ worker.terminate();
+};
+ref.onload=sendReference;
+ref.onerror=()=>{
+ message("青島の背景画を読み込めません");
+};
+sendReference();
+
+start.onclick=async()=>{
+ try{
+  stream=await navigator.mediaDevices.getUserMedia({
+   audio:false,
+   video:{facingMode:{ideal:"environment"}}
+  });
+  video.srcObject=stream;
+  await video.play();
+  start.disabled=true;
+  compare.disabled=false;
+  stop.disabled=false;
+  message("カメラ起動成功。青島の印刷物を映してください");
+ }catch(e){
+  message("カメラエラー："+e.name);
+ }
+};
+compare.onclick=()=>{
+ if(!stream||working||!video.videoWidth)return;
+ working=true;
+ compare.disabled=true;
+ message("画像照合中...");
+ worker.postMessage({type:"compare",image:capture(video)});
+};
+stop.onclick=()=>{
+ if(stream)stream.getTracks().forEach(t=>t.stop());
+ stream=null;
+ video.srcObject=null;
+ start.disabled=!referenceReady;
+ compare.disabled=true;
+ stop.disabled=true;
+ message("カメラ停止");
+};
+window.addEventListener("pagehide",()=>{
+ if(stream)stream.getTracks().forEach(t=>t.stop());
+ worker.terminate();
+ clearTimeout(timeout);
+});
+</script>
+</body>
+</html>
