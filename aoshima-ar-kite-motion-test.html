@@ -91,7 +91,7 @@ let busy=false;
 let timer=null;
 let missed=0;
 let kitePoint=null;
-
+let kiteTarget=null;
 function show(text){
   info.textContent=text;
 }
@@ -116,6 +116,10 @@ function animate(time){
   pen.clearRect(0,0,overlay.width,overlay.height);
 
   if(tracking&&kitePoint){
+    if(kiteTarget){
+  kitePoint[0]+=(kiteTarget[0]-kitePoint[0])*0.12;
+  kitePoint[1]+=(kiteTarget[1]-kitePoint[1])*0.12;
+}
     const angle=Math.sin(time/850)*0.13;
     const bob=Math.sin(time/1150)*4;
 
@@ -438,6 +442,7 @@ function stopTracking(){
   clearTimeout(timer);
   missed=0;
   kitePoint=null;
+ kiteTarget=null;
   motionButton.textContent="凧を動かす";
 }
 
@@ -528,7 +533,8 @@ try{
           overlay.height=data.height;
         }
 
-        kitePoint=data.point;
+        kiteTarget=data.point;
+if(!kitePoint) kitePoint=data.point.slice();
 
         show(
           "青島の凧を追従中\n"+
