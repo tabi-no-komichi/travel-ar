@@ -88,7 +88,7 @@ function workerProgram(){
     refPoints=feat.pts;
     refDesc=feat.desc;
     feat=null;
-    if(refDesc.rows===0)throw Error("背景画の特徴点がありません");
+  if(refDesc.rows===0)throw Error("特徴点="+refPoints.size()+"個、特徴量="+refDesc.rows+"行×"+refDesc.cols+"列");
     report("reference","青島の特徴点："+refPoints.size()+"個。カメラを起動できます");
     return;
    }
