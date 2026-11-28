@@ -146,7 +146,7 @@ function animate(time){
   const pivotX=x+w*0.61;
   const pivotY=y+h*0.34;
   pen.translate(pivotX,pivotY);
-  pen.rotate(Math.sin(time/1250+0.7)*0.04);
+ pen.rotate(Math.sin(time/1250+0.7)*0.15);
   pen.translate(-pivotX,-pivotY);
   pen.drawImage(kiteStreamers,x,y,w,h);
   pen.restore();
