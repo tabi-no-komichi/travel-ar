@@ -136,9 +136,14 @@ function animate(time){
     pen.beginPath();
     pen.moveTo(-3,14);
  pen.bezierCurveTo(-28,30,-70,76,-94,100);
-    pen.strokeStyle="rgba(255,252,240,0.85)";
-    pen.lineWidth=0.8;
-    pen.stroke();
+   const threadFade=pen.createLinearGradient(-3,14,-94,100);
+threadFade.addColorStop(0,"rgba(255,252,240,0.85)");
+threadFade.addColorStop(0.35,"rgba(255,252,240,0.45)");
+threadFade.addColorStop(0.70,"rgba(255,252,240,0)");
+threadFade.addColorStop(1,"rgba(255,252,240,0)");
+pen.strokeStyle=threadFade;
+pen.lineWidth=0.7;
+pen.stroke();
         // 原画から切り出した梅模様の凧
    if(kiteBody.complete && kiteBody.naturalWidth>0 &&
    kiteStreamers.complete && kiteStreamers.naturalWidth>0){
