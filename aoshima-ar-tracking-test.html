@@ -1,0 +1,567 @@
+
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>旅の小径・青島AR追従実験</title>
+<style>
+body {
+  font-family: sans-serif;
+  text-align: center;
+  background: #f5f1e8;
+  padding: 12px;
+}
+#reference {
+  width: 85px;
+  max-height: 130px;
+  object-fit: contain;
+}
+#stage {
+  position: relative;
+  width: 100%;
+  max-width: 480px;
+  margin: 12px auto;
+}
+video {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: #222;
+  border-radius: 8px;
+}
+canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+button {
+  font-size: 16px;
+  padding: 12px;
+  margin: 4px;
+}
+#info {
+  padding: 14px;
+  background: white;
+  border-radius: 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+</style>
+</head>
+<body>
+<h2>旅の小径</h2>
+<p>青島・AR追従実験</p>
+<img id="reference" src="aoshima_ar_target.png" alt="青島背景画">
+<div id="stage">
+  <video id="camera" autoplay muted playsinline></video>
+  <canvas id="overlay"></canvas>
+</div>
+<button id="openCamera" disabled>カメラ起動</button>
+<button id="tracking" disabled>追従開始</button>
+<button id="stopCamera" disabled>カメラ停止</button>
+<p id="info">画像認識の準備中...</p>
+
+<script>
+const reference = document.getElementById("reference");
+const camera = document.getElementById("camera");
+const overlay = document.getElementById("overlay");
+const pen = overlay.getContext("2d");
+const info = document.getElementById("info");
+const openButton = document.getElementById("openCamera");
+const trackButton = document.getElementById("tracking");
+const stopButton = document.getElementById("stopCamera");
+
+let worker;
+let workerReady = false;
+let referenceSent = false;
+let referenceReady = false;
+let stream = null;
+let tracking = false;
+let busy = false;
+let timer = null;
+let missed = 0;
+
+function show(message) {
+  info.textContent = message;
+}
+
+function capture(element) {
+  const w = element.videoWidth || element.naturalWidth;
+  const h = element.videoHeight || element.naturalHeight;
+  if (!w || !h) throw Error("画像を取得できません");
+
+  const scale = 480 / Math.max(w, h);
+  const c = document.createElement("canvas");
+  c.width = Math.round(w * scale);
+  c.height = Math.round(h * scale);
+  const context = c.getContext("2d", {
+    willReadFrequently: true
+  });
+  context.drawImage(element, 0, 0, c.width, c.height);
+  return context.getImageData(0, 0, c.width, c.height);
+}
+
+function clearFrame() {
+  pen.clearRect(0, 0, overlay.width, overlay.height);
+}
+
+function drawFrame(points, w, h) {
+  overlay.width = w;
+  overlay.height = h;
+  pen.strokeStyle = "#ff7928";
+  pen.fillStyle = "#ffffff";
+  pen.lineWidth = 4;
+
+  pen.beginPath();
+  pen.moveTo(points[0][0], points[0][1]);
+  for (let i = 1; i < 4; i++) {
+    pen.lineTo(points[i][0], points[i][1]);
+  }
+  pen.closePath();
+  pen.stroke();
+
+  for (const p of points) {
+    pen.beginPath();
+    pen.arc(p[0], p[1], 5, 0, Math.PI * 2);
+    pen.fill();
+    pen.stroke();
+  }
+}
+
+function workerProgram() {
+  let cv, orb, matcher;
+  let referencePoints = null;
+  let referenceDescriptions = null;
+  let refWidth = 0;
+  let refHeight = 0;
+  let initialized = false;
+
+  function dispose(item) {
+    if (item && typeof item.delete === "function") {
+      item.delete();
+    }
+  }
+
+  function report(type, data) {
+    self.postMessage(Object.assign({type}, data || {}));
+  }
+
+  function features(image) {
+    let src, gray, mask, points, descriptions;
+    try {
+      src = cv.matFromImageData(image);
+      gray = new cv.Mat();
+      mask = new cv.Mat();
+      points = new cv.KeyPointVector();
+      descriptions = new cv.Mat();
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+      orb.detectAndCompute(
+        gray, mask, points, descriptions
+      );
+      return {points, descriptions};
+    } catch (e) {
+      dispose(points);
+      dispose(descriptions);
+      throw e;
+    } finally {
+      dispose(src);
+      dispose(gray);
+      dispose(mask);
+    }
+  }
+
+  function transform(H, x, y) {
+    const a = H.data64F && H.data64F.length === 9
+      ? H.data64F : H.data32F;
+
+    if (!a || a.length !== 9) {
+      throw Error("変換行列が取得できません");
+    }
+
+    const divisor = a[6] * x + a[7] * y + a[8];
+    if (Math.abs(divisor) < 0.000001) {
+      throw Error("座標が不安定です");
+    }
+
+    return [
+      (a[0] * x + a[1] * y + a[2]) / divisor,
+      (a[3] * x + a[4] * y + a[5]) / divisor
+    ];
+  }
+
+  function compare(image) {
+    let f, matches, from, to, mask, H;
+    try {
+      f = features(image);
+
+      if (!referenceDescriptions ||
+          referenceDescriptions.rows === 0 ||
+          f.descriptions.rows === 0) {
+        report("result", {ok:false, good:0, inliers:0});
+        return;
+      }
+
+      matches = new cv.DMatchVector();
+      matcher.match(
+        referenceDescriptions,
+        f.descriptions,
+        matches
+      );
+
+      const source = [];
+      const target = [];
+
+      for (let i = 0; i < matches.size(); i++) {
+        const m = matches.get(i);
+        if (m.distance > 60) continue;
+
+        const p = referencePoints.get(m.queryIdx).pt;
+        const q = f.points.get(m.trainIdx).pt;
+
+        source.push(p.x, p.y);
+        target.push(q.x, q.y);
+      }
+
+      const good = source.length / 2;
+      if (good < 12) {
+        report("result", {ok:false, good, inliers:0});
+        return;
+      }
+
+      from = cv.matFromArray(
+        good, 1, cv.CV_32FC2, source
+      );
+      to = cv.matFromArray(
+        good, 1, cv.CV_32FC2, target
+      );
+
+      mask = new cv.Mat();
+      H = cv.findHomography(
+        from, to, cv.RANSAC, 5, mask
+      );
+
+      let inliers = 0;
+      for (const value of mask.data) {
+        if (value !== 0) inliers++;
+      }
+
+      if (H.rows !== 3 ||
+          inliers < 10 ||
+          inliers / good < 0.45) {
+        report("result", {ok:false, good, inliers});
+        return;
+      }
+
+      const corners = [
+        transform(H, 0, 0),
+        transform(H, refWidth, 0),
+        transform(H, refWidth, refHeight),
+        transform(H, 0, refHeight)
+      ];
+
+      if (!corners.every(p => p.every(Number.isFinite))) {
+        report("result", {ok:false, good, inliers});
+        return;
+      }
+
+      let area = 0;
+      for (let i = 0; i < 4; i++) {
+        const p = corners[i];
+        const q = corners[(i + 1) % 4];
+        area += p[0] * q[1] - q[0] * p[1];
+      }
+      area = Math.abs(area) / 2;
+
+      const frameArea = image.width * image.height;
+      if (area < frameArea * 0.01 ||
+          area > frameArea * 4) {
+        report("result", {ok:false, good, inliers});
+        return;
+      }
+
+      report("result", {
+        ok: true,
+        good,
+        inliers,
+        corners,
+        width: image.width,
+        height: image.height
+      });
+    } catch (e) {
+      report("error", {message:String(e)});
+    } finally {
+      if (f) {
+        dispose(f.points);
+        dispose(f.descriptions);
+      }
+      for (const item of [matches, from, to, mask, H]) {
+        dispose(item);
+      }
+    }
+  }
+
+  function initialize(module) {
+    try {
+      cv = module;
+      orb = new cv.ORB();
+      matcher = new cv.BFMatcher(
+        cv.NORM_HAMMING, true
+      );
+      if (typeof cv.findHomography !== "function") {
+        throw Error("位置計算機能がありません");
+      }
+      initialized = true;
+      report("ready");
+    } catch (e) {
+      report("error", {message:String(e)});
+    }
+  }
+
+  self.onmessage = event => {
+    if (!initialized) return;
+
+    const data = event.data;
+
+    if (data.type === "reference") {
+      let f;
+      try {
+        f = features(data.image);
+        dispose(referencePoints);
+        dispose(referenceDescriptions);
+
+        referencePoints = f.points;
+        referenceDescriptions = f.descriptions;
+        f = null;
+        refWidth = data.image.width;
+        refHeight = data.image.height;
+
+        if (referenceDescriptions.rows === 0) {
+          throw Error("背景画の特徴量がありません");
+        }
+        report("reference", {
+          count: referencePoints.size()
+        });
+      } catch (e) {
+        report("error", {message:String(e)});
+      } finally {
+        if (f) {
+          dispose(f.points);
+          dispose(f.descriptions);
+        }
+      }
+    } else if (data.type === "frame") {
+      compare(data.image);
+    }
+  };
+
+  try {
+    importScripts(
+      "https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js"
+    );
+    const module = self.cv;
+
+    if (module && typeof module.then === "function") {
+      module.then(initialize).catch(e => {
+        report("error", {message:String(e)});
+      });
+    } else if (module && typeof module.Mat === "function") {
+      initialize(module);
+    } else {
+      report("error", {
+        message:"OpenCV.jsを初期化できません"
+      });
+    }
+  } catch (e) {
+    report("error", {message:String(e)});
+  }
+}
+
+function sendReference() {
+  if (!workerReady || referenceSent ||
+      !reference.naturalWidth) return;
+
+  referenceSent = true;
+  worker.postMessage({
+    type: "reference",
+    image: capture(reference)
+  });
+}
+
+function nextFrame() {
+  clearTimeout(timer);
+  if (!tracking || !stream || busy) return;
+
+  if (!camera.videoWidth) {
+    timer = setTimeout(nextFrame, 300);
+    return;
+  }
+
+  try {
+    busy = true;
+    worker.postMessage({
+      type: "frame",
+      image: capture(camera)
+    });
+  } catch (e) {
+    busy = false;
+    show("撮影エラー：" + String(e));
+    timer = setTimeout(nextFrame, 500);
+  }
+}
+
+function stopTracking() {
+  tracking = false;
+  clearTimeout(timer);
+  missed = 0;
+  clearFrame();
+  trackButton.textContent = "追従開始";
+}
+
+function stopEverything() {
+  stopTracking();
+
+  if (stream) {
+    stream.getTracks().forEach(t => t.stop());
+  }
+  stream = null;
+  camera.srcObject = null;
+  openButton.disabled = !referenceReady;
+  trackButton.disabled = true;
+  stopButton.disabled = true;
+  show("カメラを停止しました");
+}
+
+try {
+  const source = "(" + workerProgram.toString() + ")()";
+  const url = URL.createObjectURL(
+    new Blob([source], {type:"text/javascript"})
+  );
+  worker = new Worker(url);
+  URL.revokeObjectURL(url);
+
+  const loadingTimeout = setTimeout(() => {
+    if (!workerReady) {
+      show("読み込みが完了しませんでした");
+    }
+  }, 60000);
+
+  worker.onmessage = event => {
+    const data = event.data;
+
+    if (data.type === "ready") {
+      workerReady = true;
+      clearTimeout(loadingTimeout);
+      sendReference();
+
+    } else if (data.type === "reference") {
+      referenceReady = true;
+      openButton.disabled = false;
+      show(
+        "青島の特徴点：" + data.count +
+        "個\n追従実験の準備完了"
+      );
+
+    } else if (data.type === "result") {
+      busy = false;
+      if (!tracking) return;
+
+      if (data.ok) {
+        missed = 0;
+        drawFrame(
+          data.corners, data.width, data.height
+        );
+        show(
+          "青島の背景画を追従中\n" +
+          "一致候補：" + data.good + "組\n" +
+          "位置一致：" + data.inliers + "組"
+        );
+      } else {
+        missed++;
+        if (missed >= 2) clearFrame();
+        show(
+          "背景画を探しています...\n" +
+          "一致候補：" + data.good + "組\n" +
+          "位置一致：" + data.inliers + "組"
+        );
+      }
+
+      timer = setTimeout(nextFrame, 300);
+
+    } else if (data.type === "error") {
+      stopTracking();
+      busy = false;
+      show("エラー：" + data.message);
+    }
+  };
+
+  worker.onerror = event => {
+    stopTracking();
+    busy = false;
+    show("プログラムエラー：" + event.message);
+  };
+
+} catch (e) {
+  show("起動エラー：" + String(e));
+}
+
+reference.onload = sendReference;
+reference.onerror = () => {
+  show("背景画の読み込みに失敗しました");
+};
+sendReference();
+
+openButton.onclick = async () => {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {facingMode:{ideal:"environment"}}
+    });
+
+    camera.srcObject = stream;
+    await camera.play();
+
+    openButton.disabled = true;
+    trackButton.disabled = false;
+    stopButton.disabled = false;
+
+    show(
+      "カメラ起動成功\n" +
+      "青島の背景画を映し、追従開始を押してください"
+    );
+  } catch (e) {
+    if (stream) {
+      stream.getTracks().forEach(t => t.stop());
+      stream = null;
+    }
+    show("カメラエラー：" + e.name);
+  }
+};
+
+trackButton.onclick = () => {
+  if (!stream) return;
+
+  if (tracking) {
+    stopTracking();
+    show("追従を停止しました");
+  } else {
+    tracking = true;
+    missed = 0;
+    trackButton.textContent = "追従停止";
+    show("背景画を探しています...");
+    nextFrame();
+  }
+};
+
+stopButton.onclick = stopEverything;
+
+window.addEventListener("pagehide", () => {
+  stopEverything();
+  if (worker) worker.terminate();
+});
+</script>
+</body>
+</html>
+hima-ar-tracking-test.html
