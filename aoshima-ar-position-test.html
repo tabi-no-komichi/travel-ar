@@ -1,0 +1,279 @@
+
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>旅の小径 青島AR位置合わせ</title>
+<style>
+body{font-family:sans-serif;text-align:center;background:#f5f1e8;padding:12px}
+#reference{width:90px;max-height:140px;object-fit:contain}
+#view{position:relative;width:100%;max-width:440px;margin:12px auto}
+video{display:block;width:100%;height:auto;background:#222;border-radius:8px}
+canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+button{font-size:16px;padding:12px;margin:5px}
+#status{background:white;border-radius:9px;padding:14px;white-space:pre-wrap;overflow-wrap:anywhere}
+</style>
+</head>
+<body>
+<h2>旅の小径</h2>
+<p>青島・AR位置合わせ実験</p>
+<img id="reference" src="aoshima_ar_target.png" alt="青島の背景画">
+<div id="view">
+<video id="camera" autoplay muted playsinline></video>
+<canvas id="overlay"></canvas>
+</div>
+<button id="start" disabled>カメラ起動</button>
+<button id="check" disabled>位置合わせ</button>
+<button id="stop" disabled>停止</button>
+<p id="status">OpenCV.js準備中...</p>
+<script>
+const ref=document.getElementById("reference");
+const video=document.getElementById("camera");
+const canvas=document.getElementById("overlay");
+const ctx=canvas.getContext("2d");
+const status=document.getElementById("status");
+const start=document.getElementById("start");
+const check=document.getElementById("check");
+const stop=document.getElementById("stop");
+let stream=null,ready=false,refSent=false,refReady=false;
+let busy=false,worker=null,deadline=null,checkTimer=null;
+
+function say(s){status.textContent=s}
+function snapshot(el){
+ const w=el.videoWidth||el.naturalWidth;
+ const h=el.videoHeight||el.naturalHeight;
+ if(!w||!h)throw Error("画像の大きさを取得できません");
+ const scale=480/Math.max(w,h);
+ const c=document.createElement("canvas");
+ c.width=Math.max(1,Math.round(w*scale));
+ c.height=Math.max(1,Math.round(h*scale));
+ const x=c.getContext("2d",{willReadFrequently:true});
+ x.drawImage(el,0,0,c.width,c.height);
+ return x.getImageData(0,0,c.width,c.height);
+}
+function clearOutline(){
+ ctx.clearRect(0,0,canvas.width,canvas.height);
+}
+function drawOutline(corners,w,h){
+ canvas.width=w;
+ canvas.height=h;
+ if(!corners||corners.length!==4)return;
+ ctx.strokeStyle="#ff7b29";
+ ctx.lineWidth=4;
+ ctx.fillStyle="#ffffff";
+ ctx.beginPath();
+ ctx.moveTo(corners[0][0],corners[0][1]);
+ for(let i=1;i<4;i++)ctx.lineTo(corners[i][0],corners[i][1]);
+ ctx.closePath();
+ ctx.stroke();
+ for(const p of corners){
+  ctx.beginPath();
+  ctx.arc(p[0],p[1],6,0,Math.PI*2);
+  ctx.fill();ctx.stroke();
+ }
+}
+function workerTask(){
+ let cv,orb,matcher,refPts,refDesc,refW,refH;
+ function send(type,extra){
+  self.postMessage(Object.assign({type:type},extra||{}));
+ }
+ function del(x){
+  if(x&&typeof x.delete==="function")x.delete();
+ }
+ function features(image){
+  let rgba,gray,mask,pts,desc;
+  try{
+   rgba=cv.matFromImageData(image);
+   gray=new cv.Mat();
+   mask=new cv.Mat();
+   pts=new cv.KeyPointVector();
+   desc=new cv.Mat();
+   cv.cvtColor(rgba,gray,cv.COLOR_RGBA2GRAY);
+   orb.detectAndCompute(gray,mask,pts,desc);
+   return {pts:pts,desc:desc};
+  }catch(e){
+   del(pts);del(desc);throw e;
+  }finally{
+   del(rgba);del(gray);del(mask);
+  }
+ }
+ function project(H,x,y){
+  const a=H.data64F&&H.data64F.length===9
+   ?H.data64F:H.data32F;
+  if(!a||a.length!==9)throw Error("変換行列を取得できません");
+  const d=a[6]*x+a[7]*y+a[8];
+  if(Math.abs(d)<0.000001)throw Error("位置計算が不安定です");
+  return [(a[0]*x+a[1]*y+a[2])/d,
+          (a[3]*x+a[4]*y+a[5])/d];
+ }
+ function process(data){
+  let feat=null,matches=null,srcMat=null,dstMat=null;
+  let mask=null,H=null;
+  try{
+   feat=features(data.image);
+   if(data.type==="reference"){
+    del(refPts);del(refDesc);
+    refPts=feat.pts;
+    refDesc=feat.desc;
+    feat=null;
+    refW=data.image.width;refH=data.image.height;
+    if(refDesc.rows===0)throw Error("背景画の特徴量がありません");
+    send("reference",{count:refPts.size()});
+    return;
+   }
+   if(!refDesc||!refDesc.rows||feat.desc.rows===0){
+    send("result",{text:"特徴量が不足しています"});
+    return;
+   }
+   matches=new cv.DMatchVector();
+   matcher.match(refDesc,feat.desc,matches);
+   const source=[],target=[];
+   for(let i=0;i<matches.size();i++){
+    const m=matches.get(i);
+    if(m.distance>60)continue;
+    const a=refPts.get(m.queryIdx).pt;
+    const b=feat.pts.get(m.trainIdx).pt;
+    source.push(a.x,a.y);
+    target.push(b.x,b.y);
+   }
+   const good=source.length/2;
+   if(good<12){
+    send("result",{text:"一致候補："+good+"組。背景画は未検出"});
+    return;
+   }
+   srcMat=cv.matFromArray(good,1,cv.CV_32FC2,source);
+   dstMat=cv.matFromArray(good,1,cv.CV_32FC2,target);
+   mask=new cv.Mat();
+   H=cv.findHomography(srcMat,dstMat,cv.RANSAC,5,mask);
+   let inliers=0;
+   for(const n of mask.data)if(n!==0)inliers++;
+   if(H.rows!==3||inliers<10||inliers/good<0.45){
+    send("result",{text:"一致候補："+good+"組\n位置一致："+inliers+"組\n位置合わせは未成功"});
+    return;
+   }
+   const coords=[
+    project(H,0,0),project(H,refW,0),
+    project(H,refW,refH),project(H,0,refH)
+   ];
+   const valid=coords.every(p=>p.every(Number.isFinite));
+   if(!valid)throw Error("四隅の座標が不正です");
+   send("result",{
+    text:"位置合わせ成功の候補\n一致候補："+good+
+     "組\n位置一致："+inliers+"組",
+    corners:coords,
+    width:data.image.width,height:data.image.height
+   });
+  }catch(e){
+   send("result",{text:"位置計算エラー："+String(e)});
+  }finally{
+   if(feat){del(feat.pts);del(feat.desc)}
+   for(const m of [matches,srcMat,dstMat,mask,H])del(m);
+  }
+ }
+ try{
+  importScripts("https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js");
+  const m=self.cv;
+  function init(module){
+   try{
+    cv=module;
+    orb=new cv.ORB();
+    matcher=new cv.BFMatcher(cv.NORM_HAMMING,true);
+    if(typeof cv.findHomography!=="function")
+     throw Error("位置合わせ機能がありません");
+    send("ready");
+   }catch(e){send("error",{text:String(e)})}
+  }
+  if(m&&typeof m.then==="function")m.then(init);
+  else if(m&&typeof m.Mat==="function")init(m);
+  else send("error",{text:"初期化できません"});
+ }catch(e){send("error",{text:String(e)})}
+ self.onmessage=e=>process(e.data);
+}
+try{
+ const source="("+workerTask.toString()+")()";
+ const url=URL.createObjectURL(
+  new Blob([source],{type:"text/javascript"}));
+ worker=new Worker(url);
+ URL.revokeObjectURL(url);
+ deadline=setTimeout(()=>{
+  if(!ready){
+   say("60秒経過：読み込みを終了しました");
+   worker.terminate();
+  }
+ },60000);
+ worker.onmessage=e=>{
+  const d=e.data;
+  if(d.type==="ready"){
+   ready=true;clearTimeout(deadline);sendReference();
+  }else if(d.type==="reference"){
+   refReady=true;start.disabled=false;
+   say("青島の特徴点："+d.count+"個。準備完了");
+  }else if(d.type==="result"){
+   clearTimeout(checkTimer);
+   busy=false;
+   clearOutline();
+   if(d.corners)drawOutline(d.corners,d.width,d.height);
+   check.disabled=!stream;
+   say(d.text+"\n※1回の撮影時点の位置です");
+  }else if(d.type==="error"){
+   clearTimeout(deadline);
+   say("エラー："+d.text);worker.terminate();
+  }
+ };
+ worker.onerror=e=>{
+  clearTimeout(deadline);
+  say("プログラムエラー："+e.message);
+  worker.terminate();
+ };
+}catch(e){say("起動エラー："+e.message)}
+function sendReference(){
+ if(!ready||refSent||!ref.naturalWidth)return;
+ refSent=true;
+ worker.postMessage({type:"reference",image:snapshot(ref)});
+}
+ref.onload=sendReference;
+ref.onerror=()=>say("背景画の読み込みに失敗しました");
+sendReference();
+start.onclick=async()=>{
+ try{
+  stream=await navigator.mediaDevices.getUserMedia({
+   audio:false,video:{facingMode:{ideal:"environment"}}
+  });
+  video.srcObject=stream;
+  await video.play();
+  start.disabled=true;check.disabled=false;stop.disabled=false;
+  say("カメラ起動成功。青島の絵を映してください");
+ }catch(e){say("カメラエラー："+e.name)}
+};
+check.onclick=()=>{
+ if(!stream||busy||!video.videoWidth)return;
+ try{
+  const image=snapshot(video);
+  canvas.width=image.width;canvas.height=image.height;
+  clearOutline();
+  busy=true;check.disabled=true;
+  say("四隅の位置を計算しています...");
+  worker.postMessage({type:"compare",image:image});
+  checkTimer=setTimeout(()=>{
+   if(busy){
+    busy=false;check.disabled=false;
+    say("照合が20秒を超えました。画面を確認してください");
+   }
+  },20000);
+ }catch(e){busy=false;check.disabled=false;say(String(e))}
+};
+stop.onclick=()=>{
+ if(stream)stream.getTracks().forEach(t=>t.stop());
+ stream=null;video.srcObject=null;clearOutline();
+ start.disabled=!refReady;check.disabled=true;stop.disabled=true;
+ say("カメラを停止しました");
+};
+window.addEventListener("pagehide",()=>{
+ if(stream)stream.getTracks().forEach(t=>t.stop());
+ if(worker)worker.terminate();
+ clearTimeout(deadline);clearTimeout(checkTimer);
+});
+</script>
+</body>
+</html>
