@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>旅の小径 青島画像認識テスト</title>
+<style>
+body{font-family:sans-serif;text-align:center;
+background:#f5f1e8;padding:16px}
+img{width:85%;max-width:350px}
+#status{background:white;padding:16px;
+border-radius:10px;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<h2>旅の小径</h2>
+<p>青島・画像特徴点テスト</p>
+<img id="picture" src="aoshima_ar_target.png">
+<p id="status">準備中...</p>
+<script>
+const picture=document.getElementById("picture");
+const status=document.getElementById("status");
+let ready=false, sent=false;
+
+function sendImage(){
+ if(!ready||sent||!picture.naturalWidth)return;
+ sent=true;
+ const c=document.createElement("canvas");
+ const scale=500/Math.max(
+   picture.naturalWidth,picture.naturalHeight);
+ c.width=Math.round(picture.naturalWidth*scale);
+ c.height=Math.round(picture.naturalHeight*scale);
+ const ctx=c.getContext("2d");
+ ctx.drawImage(picture,0,0,c.width,c.height);
+ worker.postMessage(ctx.getImageData(
+   0,0,c.width,c.height));
+ status.textContent="特徴点を解析中...";
+}
+function workerTask(){
+ let cv;
+ function start(module){
+  cv=module;
+  postMessage({type:"ready"});
+ }
+ onmessage=function(e){
+  let src,gray,mask,orb,points,desc;
+  try{
+   src=cv.matFromImageData(e.data);
+   gray=new cv.Mat();
+   mask=new cv.Mat();
+   points=new cv.KeyPointVector();
+   desc=new cv.Mat();
+   cv.cvtColor(src,gray,cv.COLOR_RGBA2GRAY);
+   if(!cv.ORB)throw Error("ORB機能がありません");
+   orb=cv.ORB.create();
+   orb.detectAndCompute(gray,mask,points,desc);
+   postMessage({type:"result",
+     count:points.size()});
+  }catch(err){
+   postMessage({type:"error",text:String(err)});
+  }finally{
+   for(const x of [src,gray,mask,orb,points,desc]){
+    if(x&&typeof x.delete==="function")x.delete();
+   }
+  }
+ };
+ try{
+  importScripts("https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js");
+  const m=self.cv;
+  if(m&&typeof m.then==="function")m.then(start);
+  else if(m&&typeof m.Mat==="function")start(m);
+  else postMessage({type:"error",text:"初期化失敗"});
+ }catch(err){
+  postMessage({type:"error",text:String(err)});
+ }
+}
+const blob=new Blob(
+ ["("+workerTask.toString()+")()"],
+ {type:"text/javascript"});
+const url=URL.createObjectURL(blob);
+const worker=new Worker(url);
+URL.revokeObjectURL(url);
+
+const limit=setTimeout(()=>{
+ status.textContent="60秒経過：処理を終了しました";
+ worker.terminate();
+},60000);
+worker.onmessage=e=>{
+ const d=e.data;
+ if(d.type==="ready"){
+  ready=true;
+  sendImage();
+ }else{
+  clearTimeout(limit);
+  status.textContent=d.type==="result"
+   ?"成功：特徴点 "+d.count+" 個"
+   :"エラー："+d.text;
+  worker.terminate();
+ }
+};
+worker.onerror=e=>{
+ clearTimeout(limit);
+ status.textContent="実行エラー："+e.message;
+ worker.terminate();
+};
+picture.onload=sendImage;
+picture.onerror=()=>{
+ status.textContent="背景画像を読み込めません";
+ clearTimeout(limit);
+ worker.terminate();
+};
+</script>
+</body>
+</html>
