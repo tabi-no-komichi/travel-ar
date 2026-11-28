@@ -78,6 +78,10 @@ const overlay=document.getElementById("overlay");
 const pen=overlay.getContext("2d");
   const kiteImage=new Image();
 kiteImage.src="aoshima_kite_cutout.png";
+  const kiteBody=new Image();
+kiteBody.src="aoshima_kite_body.png";
+const kiteStreamers=new Image();
+kiteStreamers.src="aoshima_kite_streamers.png";
 const info=document.getElementById("info");
 const startButton=document.getElementById("start");
 const motionButton=document.getElementById("motion");
@@ -130,11 +134,26 @@ function animate(time){
     pen.rotate(angle);
 
         // 原画から切り出した梅模様の凧
-    if(kiteImage.complete && kiteImage.naturalWidth>0){
-      const w=60;
-      const h=w*kiteImage.naturalHeight/kiteImage.naturalWidth;
-      pen.drawImage(kiteImage,-w*0.65,-h*0.17,w,h);
-    }
+   if(kiteBody.complete && kiteBody.naturalWidth>0 &&
+   kiteStreamers.complete && kiteStreamers.naturalWidth>0){
+  const w=60;
+  const h=w*kiteBody.naturalHeight/kiteBody.naturalWidth;
+  const x=-w*0.65;
+  const y=-h*0.17;
+
+  // 細い飾りを少し遅れて揺らす
+  pen.save();
+  const pivotX=x+w*0.61;
+  const pivotY=y+h*0.34;
+  pen.translate(pivotX,pivotY);
+  pen.rotate(Math.sin(time/1250+0.7)*0.04);
+  pen.translate(-pivotX,-pivotY);
+  pen.drawImage(kiteStreamers,x,y,w,h);
+  pen.restore();
+
+  // 元の梅模様の凧本体
+  pen.drawImage(kiteBody,x,y,w,h);
+}
 
     pen.restore();
   }
