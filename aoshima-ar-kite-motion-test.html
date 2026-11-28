@@ -132,7 +132,13 @@ function animate(time){
     pen.save();
     pen.translate(kitePoint[0],kitePoint[1]+bob);
     pen.rotate(angle);
-
+    // 青島の空に伸びる白い凧糸（仮の位置）
+    pen.beginPath();
+    pen.moveTo(-3,14);
+    pen.bezierCurveTo(-35,45,-95,120,-160,165);
+    pen.strokeStyle="rgba(255,252,240,0.85)";
+    pen.lineWidth=0.8;
+    pen.stroke();
         // 原画から切り出した梅模様の凧
    if(kiteBody.complete && kiteBody.naturalWidth>0 &&
    kiteStreamers.complete && kiteStreamers.naturalWidth>0){
